@@ -1,0 +1,577 @@
+openapi: 3.0.3
+info:
+  title: Attendance API
+  version: '2.0'
+  description: |
+    Read attendance data and manage members from your own backend, using an API key.
+
+    ## Auth
+
+    Generate a key at https://shehryar.me/keys. It is shown once, so copy it then.
+    Send it as a bearer token on every request:
+
+    `Authorization: Bearer att_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx`
+
+    Server to server only. Do not put the key in a browser app, it would be
+    visible to your users. Call the API from your backend and proxy to your
+    frontend. Anyone with the key can use it, so if it leaks, regenerate it.
+
+    ## Devices
+
+    Each location is a separate device with a short code, like `main-gate`. Your
+    key is granted access to specific devices, for reading, writing, or both. Call
+    `GET /devices` to see which ones your key can use, then put a device's code
+    wherever a path shows `{device}`. A device your key was not granted returns
+    `403`, and an unknown code returns `404`.
+
+    ## Times
+
+    All times are UTC, in ISO 8601. Apply your own timezone offset when you show
+    them.
+servers:
+  - url: https://api.shehryar.me/api/public/attendance
+    description: Production. The exact host is shared with your credentials.
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: Discovery
+    description: Find out which devices your key can use.
+  - name: Read
+    description: Read members, punches and device status. Needs read access.
+  - name: Write
+    description: Rename or remove members, and send the device a command. Needs write access.
+  - name: Enrollment
+    description: Add a new member with a live fingerprint scan. Needs write access.
+  - name: Deprecated
+    description: >
+      Older endpoints that work on your main device, with no device code in the
+      path. They still work, but are deprecated. Move to the `/{device}`
+      endpoints, which return the same shapes.
+
+paths:
+  /devices:
+    get:
+      tags: [Discovery]
+      summary: List your devices
+      description: Returns the devices your key can use.
+      operationId: listDevices
+      responses:
+        '200':
+          description: The devices available to your key.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/DeviceSummary' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /{device}/workers:
+    parameters:
+      - $ref: '#/components/parameters/Device'
+    get:
+      tags: [Read]
+      summary: List members
+      description: Everyone enrolled on the device. The device administrator is not included.
+      operationId: listWorkers
+      responses:
+        '200':
+          description: Members, sorted by name.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Worker' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/UnknownDevice' }
+
+  /{device}/logs:
+    parameters:
+      - $ref: '#/components/parameters/Device'
+    get:
+      tags: [Read]
+      summary: List punches
+      description: >
+        Punches for the device, newest first, paginated. The administrator's
+        punches are not included.
+      operationId: listLogs
+      parameters:
+        - name: from
+          in: query
+          description: Only punches at or after this time (UTC).
+          schema: { type: string, format: date-time }
+        - name: to
+          in: query
+          description: Only punches before this time (UTC).
+          schema: { type: string, format: date-time }
+        - name: deviceUserId
+          in: query
+          description: Only this member's punches.
+          schema: { type: string }
+        - name: limit
+          in: query
+          description: How many to return, 1 to 1000.
+          schema: { type: integer, minimum: 1, maximum: 1000, default: 100 }
+        - name: cursor
+          in: query
+          description: Pass the previous page's nextCursor to get the next page.
+          schema: { type: string }
+      responses:
+        '200':
+          description: A page of punches.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LogsPage' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/UnknownDevice' }
+
+  /{device}/device:
+    parameters:
+      - $ref: '#/components/parameters/Device'
+    get:
+      tags: [Read]
+      summary: Device status
+      description: A quick health check, for an online indicator.
+      operationId: deviceStatus
+      responses:
+        '200':
+          description: The device's current status.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DeviceStatus' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/UnknownDevice' }
+
+  /{device}/workers/{id}/name:
+    parameters:
+      - $ref: '#/components/parameters/Device'
+      - $ref: '#/components/parameters/WorkerId'
+    put:
+      tags: [Write]
+      summary: Rename a member
+      description: Changes the member's name and sends it to the device. The device must be online.
+      operationId: renameWorker
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/NameBody' }
+      responses:
+        '200':
+          description: The updated member.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Worker' }
+        '400': { $ref: '#/components/responses/BadName' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/UnknownWorker' }
+        '409': { $ref: '#/components/responses/DeviceOffline' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /{device}/workers/{id}:
+    parameters:
+      - $ref: '#/components/parameters/Device'
+      - $ref: '#/components/parameters/WorkerId'
+    delete:
+      tags: [Write]
+      summary: Remove a member
+      description: >
+        Removes the member and their punch history, and deletes them from the
+        device. The administrator cannot be removed. The device must be online.
+      operationId: deleteWorker
+      responses:
+        '200':
+          description: Removed.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { deleted: { type: boolean, enum: [true] } }
+                required: [deleted]
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          description: Your key does not have access to this device, or you tried to remove the administrator.
+        '404': { $ref: '#/components/responses/UnknownWorker' }
+        '409': { $ref: '#/components/responses/DeviceOffline' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /{device}/sync:
+    parameters:
+      - $ref: '#/components/parameters/Device'
+    post:
+      tags: [Write]
+      summary: Refresh from the device
+      description: >
+        Asks the device to resend anything you might be missing. Punches already
+        arrive in real time, so this is just a safety net. The device must be
+        online.
+      operationId: syncDevice
+      responses:
+        '200': { $ref: '#/components/responses/Queued' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/UnknownDevice' }
+        '409': { $ref: '#/components/responses/DeviceOffline' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /{device}/reboot:
+    parameters:
+      - $ref: '#/components/parameters/Device'
+    post:
+      tags: [Write]
+      summary: Restart the device
+      description: Restarts the device. The device must be online.
+      operationId: rebootDevice
+      responses:
+        '200': { $ref: '#/components/responses/Queued' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/UnknownDevice' }
+        '409': { $ref: '#/components/responses/DeviceOffline' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /{device}/members:
+    parameters:
+      - $ref: '#/components/parameters/Device'
+    post:
+      tags: [Enrollment]
+      summary: Add a member
+      description: >
+        Starts enrolling a new member. It assigns them an ID on the device and
+        starts a live fingerprint scan, then returns the ID. The member is not
+        active yet. They become active once they scan their finger at the device
+        and the first punch comes through. Poll
+        `GET /{device}/enroll/{pin}/status` to follow along, or
+        `DELETE /{device}/enroll/{pin}` to cancel.
+
+
+        Send an `Idempotency-Key` header so a retry does not start a second
+        enrollment. If you retry with the same key you get the original result
+        back, with the same ID. Keys are remembered for 24 hours. The device must
+        be online.
+      operationId: enrollMember
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/NameBody' }
+      responses:
+        '201':
+          description: Enrollment started. On a retry with the same key, the original result.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PendingEnrollment' }
+        '400':
+          description: The name is invalid, or the Idempotency-Key header is missing.
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/UnknownDevice' }
+        '409':
+          description: The device is offline, or a request with this key is still in progress.
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /{device}/enroll/{pin}/status:
+    parameters:
+      - $ref: '#/components/parameters/Device'
+      - $ref: '#/components/parameters/Pin'
+    get:
+      tags: [Enrollment]
+      summary: Check an enrollment
+      description: >
+        pending means the scan has not happened yet. enrolled means the member is
+        active and now shows in the members list. failed means it timed out, was
+        cancelled, or was never started.
+      operationId: enrollStatus
+      responses:
+        '200':
+          description: The enrollment's current state.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/EnrollStatus' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/UnknownDevice' }
+
+  /{device}/enroll/{pin}:
+    parameters:
+      - $ref: '#/components/parameters/Device'
+      - $ref: '#/components/parameters/Pin'
+    delete:
+      tags: [Enrollment]
+      summary: Cancel an enrollment
+      description: Cancels an enrollment in progress and removes the unfinished user from the device.
+      operationId: cancelEnrollment
+      responses:
+        '200':
+          description: Cancelled.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { cancelled: { type: boolean, enum: [true] } }
+                required: [cancelled]
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/UnknownDevice' }
+
+  /workers:
+    get:
+      tags: [Deprecated]
+      deprecated: true
+      summary: List members (main device)
+      description: Deprecated. Use GET /{device}/workers.
+      operationId: listWorkersV1
+      responses:
+        '200':
+          description: 'Members. The response carries a Deprecation header.'
+          headers:
+            Deprecation: { $ref: '#/components/headers/Deprecation' }
+            Link: { $ref: '#/components/headers/SuccessorLink' }
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Worker' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /logs:
+    get:
+      tags: [Deprecated]
+      deprecated: true
+      summary: List punches (main device)
+      description: Deprecated. Use GET /{device}/logs.
+      operationId: listLogsV1
+      parameters:
+        - { name: from, in: query, schema: { type: string, format: date-time } }
+        - { name: to, in: query, schema: { type: string, format: date-time } }
+        - { name: deviceUserId, in: query, schema: { type: string } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 1000, default: 100 } }
+        - { name: cursor, in: query, schema: { type: string } }
+      responses:
+        '200':
+          description: 'A page of punches. The response carries a Deprecation header.'
+          headers:
+            Deprecation: { $ref: '#/components/headers/Deprecation' }
+            Link: { $ref: '#/components/headers/SuccessorLink' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LogsPage' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /device:
+    get:
+      tags: [Deprecated]
+      deprecated: true
+      summary: Device status (main device)
+      description: Deprecated. Use GET /{device}/device.
+      operationId: deviceStatusV1
+      responses:
+        '200':
+          description: 'The device status. The response carries a Deprecation header.'
+          headers:
+            Deprecation: { $ref: '#/components/headers/Deprecation' }
+            Link: { $ref: '#/components/headers/SuccessorLink' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DeviceStatus' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: Your API key.
+
+  parameters:
+    Device:
+      name: device
+      in: path
+      required: true
+      description: A device code, from the list at GET /devices.
+      schema: { type: string, pattern: '^[a-z0-9-]+$' }
+      example: main-gate
+    WorkerId:
+      name: id
+      in: path
+      required: true
+      description: The member's id, from GET /{device}/workers.
+      schema: { type: string }
+      example: 6a5b7fd13e7469f650ccb6eb
+    Pin:
+      name: pin
+      in: path
+      required: true
+      description: The member's device ID, returned by POST /{device}/members.
+      schema: { type: string }
+      example: '8'
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: A unique value for each enrollment, such as a UUID. Remembered for 24 hours.
+      schema: { type: string, maxLength: 200 }
+      example: 7c9e6679-7425-40de-944b-e07fc1f90ae7
+
+  headers:
+    Deprecation:
+      description: Set to true on responses from deprecated endpoints.
+      schema: { type: string, enum: ['true'] }
+    SuccessorLink:
+      description: Points to the endpoint you should use instead.
+      schema: { type: string }
+
+  responses:
+    Queued:
+      description: The command was sent to the device.
+      content:
+        application/json:
+          schema:
+            type: object
+            properties: { queued: { type: boolean, enum: [true] } }
+            required: [queued]
+    BadRequest:
+      description: Something in your request was invalid.
+    BadName:
+      description: A name is required, and it cannot contain tabs or line breaks.
+    Unauthorized:
+      description: Your API key is missing or invalid.
+    Forbidden:
+      description: Your key does not have access to this device.
+    UnknownDevice:
+      description: No device with that code.
+    UnknownWorker:
+      description: No member with that id on this device.
+    DeviceOffline:
+      description: The device is offline, so the command was not sent. Try again once it is back.
+    RateLimited:
+      description: You are sending requests too fast. Slow down and try again shortly.
+
+  schemas:
+    DeviceSummary:
+      type: object
+      properties:
+        slug:
+          type: string
+          description: The device's code. Put this value wherever a path shows {device}.
+          example: main-gate
+        label:
+          type: string
+          description: A friendly name for the location.
+          example: 'Head Office, Main Gate'
+      required: [slug, label]
+
+    Worker:
+      type: object
+      properties:
+        id: { type: string, example: 6a5b7fd13e7469f650ccb6eb }
+        deviceUserId:
+          type: string
+          description: The member's ID on the device. It stays the same for the person, and you filter /logs by it.
+          example: '7'
+        name:
+          type: string
+          description: May be a placeholder until someone sets a real name. Fall back to deviceUserId for a stable label.
+          example: Ali
+        nameSource:
+          type: string
+          enum: [placeholder, device, manual]
+          description: 'How the name was set. placeholder is automatic, device was set on the device, manual was set through the API or dashboard.'
+        lastMethod:
+          type: string
+          enum: [face, fingerprint, password, card, unknown]
+          description: How they last identified themselves.
+      required: [id, deviceUserId, name, nameSource, lastMethod]
+
+    LogEntry:
+      type: object
+      properties:
+        id: { type: string }
+        worker:
+          type: object
+          properties:
+            id: { type: string }
+            deviceUserId: { type: string }
+            name: { type: string }
+          required: [id, deviceUserId, name]
+        punchedAt: { type: string, format: date-time, description: When the punch happened, in UTC. }
+        method:
+          type: string
+          enum: [face, fingerprint, password, card, unknown]
+        rawVerify:
+          type: string
+          description: 'The raw method code from the device: 1 fingerprint, 3 password, 4 card, 15 face.'
+      required: [id, worker, punchedAt, method, rawVerify]
+
+    LogsPage:
+      type: object
+      properties:
+        logs:
+          type: array
+          items: { $ref: '#/components/schemas/LogEntry' }
+        nextCursor:
+          type: string
+          nullable: true
+          description: Pass this back as cursor for the next page. It is null when there are no more.
+      required: [logs, nextCursor]
+
+    DeviceStatus:
+      type: object
+      properties:
+        online:
+          type: boolean
+          description: True if the device was seen in about the last 45 seconds.
+        lastHandshakeAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: When the device last completed its handshake. It only changes when the device restarts. null until it happens.
+        lastSeenAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: The last time the device made contact.
+        lastAttlogAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: The time of the most recent punch.
+      required: [online, lastHandshakeAt, lastSeenAt, lastAttlogAt]
+
+    NameBody:
+      type: object
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 64
+          description: 1 to 64 characters. No tabs or line breaks.
+          example: Ali Khan
+      required: [name]
+
+    PendingEnrollment:
+      type: object
+      properties:
+        pin: { type: string, description: The ID assigned to the member on the device., example: '8' }
+        name: { type: string, example: New Person }
+      required: [pin, name]
+
+    EnrollStatus:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [pending, enrolled, failed]
+      required: [status]
